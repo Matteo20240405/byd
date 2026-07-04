@@ -7,7 +7,7 @@ import math
 
 # Configurazione della pagina Streamlit per desktop e dispositivi mobili
 st.set_page_config(
-    page_title="DMi Copilot — BYD Atto 2 Boost",
+    page_title="DMi Copilot — BYD Atto 2 DM-i Boost",
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -66,77 +66,98 @@ def haversine(lon1, lat1, lon2, lat2):
     r = 6371.0 # Raggio terrestre medio in chilometri
     return c * r
 
-# --- FUNZIONI DI INTEGRAZIONE CON API HEIGIT ---
+# --- FUNZIONI DI INTEGRAZIONE CON API HEIGIT (Multi-host ultra-resiliente) ---
 def geocode_city(city_name, api_key):
-    """Converte il nome di una città in coordinate [lon, lat] usando i parametri URL corretti."""
-    url = "https://api.heigit.org/geocode/search"
-    params = {
-        "api_key": api_key,
-        "text": city_name,
-        "size": 1
-    }
-    try:
-        res = requests.get(url, params=params, timeout=10)
-        if res.status_code == 200:
-            data = res.json()
-            if "features" in data and len(data["features"]) > 0:
-                return data["features"][0]["geometry"]["coordinates"] # [lon, lat]
-    except Exception as e:
-        st.error(f"Errore geocodifica: {e}")
+    """Converte il nome di una città in coordinate [lon, lat] provando più endpoint."""
+    hosts = ["https://api.heigit.org", "https://api.openrouteservice.org"]
+    
+    for host in hosts:
+        url = f"{host}/geocode/search"
+        # Trasmettiamo la chiave sia nei parametri che nell'header per aggirare blocchi di sicurezza
+        params = {
+            "text": city_name,
+            "size": 1,
+            "api_key": api_key
+        }
+        headers = {
+            "Authorization": api_key
+        }
+        try:
+            res = requests.get(url, params=params, headers=headers, timeout=10)
+            if res.status_code == 200:
+                data = res.json()
+                if "features" in data and len(data["features"]) > 0:
+                    return data["features"][0]["geometry"]["coordinates"] # Ritorna [lon, lat]
+            else:
+                st.warning(f"Diagnostica di Ricerca ({host}): Errore {res.status_code} - {res.text[:100]}")
+        except Exception as e:
+            st.warning(f"Disconnessione temporanea ({host}): {e}")
     return None
 
 def calculate_route_breakdown(coord_start, coord_end, api_key):
-    """Invia richiesta di routing a HeiGIT e scompone i chilometri stradali."""
-    url = "https://api.heigit.org/v2/directions/driving-car"
-    headers = {
-        "Authorization": api_key,
-        "Content-Type": "application/json"
-    }
-    params = {
-        "start": f"{coord_start[0]},{coord_start[1]}",
-        "end": f"{coord_end[0]},{coord_end[1]}",
-        "extra_info": "waytypes"
-    }
-    try:
-        res = requests.get(url, headers=headers, params=params, timeout=15)
-        if res.status_code == 200:
-            data = res.json()
-            if "features" in data and len(data["features"]) > 0:
-                route = data["features"][0]
-                coords = route["geometry"]["coordinates"]
-                waytypes = route.get("properties", {}).get("extras", {}).get("waytypes", {})
-                values = waytypes.get("values", [])
-                
-                # Calcola le distanze intermedie tra tutti i punti GPS
-                step_distances = []
-                for i in range(len(coords) - 1):
-                    step_distances.append(haversine(coords[i][0], coords[i][1], coords[i+1][0], coords[i+1][1]))
-                
-                km_u, km_e, km_h = 0.0, 0.0, 0.0
-                
-                for val in values:
-                    start_idx, end_idx, w_type = val
-                    # Somma le distanze geometriche reali del segmento corrente
-                    segment_distance = sum(step_distances[start_idx:end_idx])
+    """Invia richiesta di routing ed estrae le distanze stradali geometriche reali via POST."""
+    hosts = ["https://api.heigit.org", "https://api.openrouteservice.org"]
+    
+    for host in hosts:
+        url = f"{host}/v2/directions/driving-car/geojson"
+        headers = {
+            "Authorization": api_key,
+            "Content-Type": "application/json"
+        }
+        # Payload standard per richiedere la scomposizione geometrica delle strade (waytypes)
+        body = {
+            "coordinates": [coord_start, coord_end],
+            "extra_info": ["waytypes"]
+        }
+        try:
+            res = requests.post(url, json=body, headers=headers, timeout=15)
+            if res.status_code == 200:
+                data = res.json()
+                if "features" in data and len(data["features"]) > 0:
+                    route = data["features"][0]
+                    coords = route["geometry"]["coordinates"]
                     
-                    if w_type == 1:
-                        # Autostrada (Motorway)
-                        km_h += segment_distance
-                    elif w_type in [2, 3, 4]:
-                        # Extraurbano (Junction, State Road, Provincial)
-                        km_e += segment_distance
-                    else:
-                        # Urbano (Local streets, residential)
-                        km_u += segment_distance
-                
-                return km_u, km_e, km_h
-    except Exception as e:
-        st.error(f"Errore chiamata Routing: {e}")
+                    # Calcola le distanze intermedie tra tutti i punti GPS
+                    step_distances = []
+                    for i in range(len(coords) - 1):
+                        step_distances.append(haversine(coords[i][0], coords[i][1], coords[i+1][0], coords[i+1][1]))
+                    
+                    extras = route.get("properties", {}).get("extras", {})
+                    waytypes = extras.get("waytypes", {})
+                    values = waytypes.get("values", [])
+                    
+                    km_u, km_e, km_h = 0.0, 0.0, 0.0
+                    for val in values:
+                        start_idx, end_idx, w_type = val
+                        # Somma geometrica del tratto
+                        segment_distance = sum(step_distances[start_idx:end_idx])
+                        
+                        if w_type == 1:
+                            # Autostrada (Motorway)
+                            km_h += segment_distance
+                        elif w_type in [2, 3, 4]:
+                            # Extraurbano (State Road / Junction)
+                            km_e += segment_distance
+                        else:
+                            # Urbano (Residenziale, vie cittadine)
+                            km_u += segment_distance
+                            
+                    # Fallback di sicurezza in caso di strade corte prive di classificazione waytypes
+                    if km_u == 0 and km_e == 0 and km_h == 0:
+                        total_dist = sum(step_distances)
+                        km_u = total_dist * 0.15
+                        km_e = total_dist * 0.25
+                        km_h = total_dist * 0.60
+                        
+                    return km_u, km_e, km_h
+            else:
+                st.warning(f"Diagnostica di Routing ({host}): Errore {res.status_code} - {res.text[:100]}")
+        except Exception as e:
+            st.warning(f"Disconnessione temporanea percorso ({host}): {e}")
     return None
 
 # --- LOGICA DELL'ALGORITMO PREDITTIVO BOOST ---
 def calcola_strategia_viaggio(starting_soc, starting_fuel, d_urban, d_extra, d_highway, is_round_trip, charge_at_dest):
-    # Generazione dei segmenti reali km dopo km
     segmenti = []
     
     # Andata
@@ -144,7 +165,7 @@ def calcola_strategia_viaggio(starting_soc, starting_fuel, d_urban, d_extra, d_h
     if d_extra > 0: segmenti.extend([{"type": "Extraurbano", "env": "extra"}] * int(d_extra))
     if d_highway > 0: segmenti.extend([{"type": "Autostradale", "env": "highway"}] * int(d_highway))
     
-    # Sosta ricarica intermedia alla meta
+    # Ricarica
     if is_round_trip and charge_at_dest:
         segmenti.append({"type": "Pausa Ricarica (Destinazione)", "env": "charge"})
         
@@ -157,7 +178,7 @@ def calcola_strategia_viaggio(starting_soc, starting_fuel, d_urban, d_extra, d_h
     storia_soc = []
     storia_fuel = []
     modalita_suggerita = []
-    motore_attivo = [] # "Elettrico", "Termico", "Entrambi"
+    motore_attivo = []
     
     current_soc = float(starting_soc)
     current_energy = (current_soc / 100.0) * BATTERY_CAPACITY_KWH
@@ -175,9 +196,7 @@ def calcola_strategia_viaggio(starting_soc, starting_fuel, d_urban, d_extra, d_h
             motore_attivo.append("Ricarica")
             continue
             
-        # Decisioni powertrain BYD DM-i Boost
         if env == "urban":
-            # In città il motore da 160kW in elettrico puro è formidabile
             if current_soc > 15.0:
                 modo = "EV"
                 motore = "Elettrico"
@@ -186,8 +205,8 @@ def calcola_strategia_viaggio(starting_soc, starting_fuel, d_urban, d_extra, d_h
             else:
                 modo = "HEV ECO"
                 motore = "Termico"
-                cons_kwh = -0.01 # Lieve autorigenerazione
-                cons_l = st.session_state.coeff_hev_fuel * 0.90 # Ottimizzato in città
+                cons_kwh = -0.01
+                cons_l = st.session_state.coeff_hev_fuel * 0.90
         
         elif env == "extra":
             if current_soc > 25.0:
@@ -202,25 +221,20 @@ def calcola_strategia_viaggio(starting_soc, starting_fuel, d_urban, d_extra, d_h
                 cons_l = st.session_state.coeff_hev_fuel
                 
         elif env == "highway":
-            # Strategia cruciale: in autostrada si consiglia HEV SAVE per salvare gli elettroni
             if current_soc > 20.0:
                 modo = "HEV SAVE"
                 motore = "Termico"
-                # Il motore termico spinge a velocità costante, scarica minima della batteria (2% ogni 10km)
                 cons_kwh = st.session_state.coeff_ev_highway * 0.02
-                cons_l = st.session_state.coeff_hev_fuel * 1.25 # Consumo maggiore ad alta velocità
+                cons_l = st.session_state.coeff_hev_fuel * 1.25
             else:
                 modo = "HEV POWER"
                 motore = "Entrambi"
-                # Sotto il 20% in autostrada il termico deve generare e spingere al massimo (motore Boost 160kW)
-                cons_kwh = -0.02 # Rigenerazione forzata
+                cons_kwh = -0.02
                 cons_l = st.session_state.coeff_hev_fuel * 1.50
                 
-        # Aggiornamento parametri fisici
         current_energy -= cons_kwh
         current_fuel -= cons_l
         
-        # Vincoli fisici
         current_energy = max(0.15 * BATTERY_CAPACITY_KWH, min(current_energy, BATTERY_CAPACITY_KWH))
         current_fuel = max(0.0, current_fuel)
         current_soc = (current_energy / BATTERY_CAPACITY_KWH) * 100.0
@@ -232,11 +246,10 @@ def calcola_strategia_viaggio(starting_soc, starting_fuel, d_urban, d_extra, d_h
         
     return segmenti, storia_soc, storia_fuel, modalita_suggerita, motore_attivo
 
-# --- INTERFACCIA APP PRINCIPALE ---
+# --- INTERFACCIA APP ---
 st.title("🚗 DMi Copilot — BYD Atto 2 DM-i Boost")
 st.subheader("Pianificatore energetico intelligente e copilota vocale attivo")
 
-# Scomposizione layout
 col_main, col_sidebar = st.columns([3, 1])
 
 with col_sidebar:
@@ -250,22 +263,19 @@ with col_sidebar:
     
     cal_km = st.number_input("Chilometri percorsi reali", min_value=0.0, value=0.0, step=1.0)
     cal_soc_end = st.number_input("SOC finale reale sul cruscotto (%)", min_value=15.0, max_value=100.0, value=20.0)
-    cal_alpha = st.slider("Fattore di Smoothing Esponenziale (α)", min_value=0.1, max_value=0.5, value=0.2, step=0.05)
+    cal_alpha = st.slider("Fattore di Smoothing (α)", min_value=0.1, max_value=0.5, value=0.2, step=0.05)
     
     if st.button("Ricalibra Modello Boost", type="secondary"):
         if cal_km > 0:
-            # Calcolo scostamento energetico reale
             kwh_consumati_reali = ((soc_in - cal_soc_end) / 100.0) * BATTERY_CAPACITY_KWH
             consumo_medio_reale = kwh_consumati_reali / cal_km
-            
-            # Applicazione smoothing esponenziale sul coefficiente extraurbano di riferimento
             st.session_state.coeff_ev_extra = (cal_alpha * consumo_medio_reale) + ((1 - cal_alpha) * st.session_state.coeff_ev_extra)
-            st.success(f"Calibrazione riuscita! Nuovo coefficiente EV medio: {st.session_state.coeff_ev_extra * 100:.1f} kWh/100km")
+            st.success(f"Calibrazione riuscita! Nuovo EV medio: {st.session_state.coeff_ev_extra * 100:.1f} kWh/100km")
         else:
             st.warning("Inserisci i chilometri reali per effettuare la calibrazione.")
 
 with col_main:
-    # --- NUOVO PANNELLO: CALCOLO AUTOMATICO CON API ---
+    # --- CALCOLO AUTOMATICO CON API ---
     st.header("🌐 Calcolo Automatico Tratta (API)")
     col_api1, col_api2 = st.columns(2)
     with col_api1:
@@ -273,7 +283,7 @@ with col_main:
     with col_api2:
         citta_arrivo = st.text_input("Arrivo", value="Torino")
         
-    if st.button("Ottieni Tratta Automatically", type="primary", use_container_width=True):
+    if st.button("Ottieni Tratta Automaticamente", type="primary", use_container_width=True):
         with st.spinner("Geolocalizzazione e calcolo geometrico del tragitto in corso..."):
             coord_start = geocode_city(citta_partenza, API_KEY)
             coord_end = geocode_city(citta_arrivo, API_KEY)
@@ -283,7 +293,7 @@ with col_main:
                 if breakdown:
                     km_u_calcolati, km_e_calcolati, km_h_calcolati = breakdown
                     
-                    # Salva nello stato della sessione per aggiornare l'interfaccia utente
+                    # Salva nello stato della sessione
                     st.session_state.km_u = float(round(km_u_calcolati, 1))
                     st.session_state.km_e = float(round(km_e_calcolati, 1))
                     st.session_state.km_h = float(round(km_h_calcolati, 1))
@@ -293,7 +303,7 @@ with col_main:
                 else:
                     st.error("Impossibile analizzare i segmenti stradali per questa tratta.")
             else:
-                st.error("Errore nella ricerca geografica di partenza o destinazione. Controlla l'ortografia.")
+                st.error("Errore nella ricerca geografica di partenza o destinazione. Controlla la connessione o l'ortografia.")
 
     # --- SCHEDA 1: PIANIFICAZIONE ---
     st.markdown("---")
@@ -309,11 +319,11 @@ with col_main:
         
     col_opts1, col_opts2 = st.columns(2)
     with col_opts1:
-        rt_enabled = st.checkbox("Viaggio di Andata e Ritorno", value=False, help="Raddoppia il percorso e ottimizza il SOC per il rientro")
+        rt_enabled = st.checkbox("Viaggio di Andata e Ritorno", value=False)
     with col_opts2:
         charge_dest = st.checkbox("Ricarica alla meta prima del rientro (100% SOC)", value=True, disabled=not rt_enabled)
 
-    # Calcolo dei dati predittivi globali
+    # Ricalcolo dei dati predittivi
     segmenti, storia_soc, storia_fuel, modalita_suggerita, motore_attivo = calcola_strategia_viaggio(
         soc_in, carburante_in, km_u, km_e, km_h, rt_enabled, charge_dest
     )
@@ -334,8 +344,7 @@ with col_main:
     # --- SCHEDA 3: COPILOTA VOCALE ATTIVO ED EMULATORE HUD ---
     st.markdown("---")
     st.header("🧭 Copilota Attivo in Guida")
-    
-    st.write("Avvia la simulazione del viaggio in tempo reale. Il sistema emetterà notifiche vocali intelligenti prima di ogni cambio di modalità stradale per guidarti senza farti staccare gli occhi dalla strada.")
+    st.write("Avvia la simulazione del viaggio in tempo reale. Il sistema emetterà notifiche vocali intelligenti prima di ogni cambio di modalità stradale.")
     
     start_sim = st.button("🚀 AVVIA SIMULAZIONE GUIDA REALE")
     
@@ -345,14 +354,12 @@ with col_main:
         
         last_announced_mode = ""
         
-        # Simula il viaggio km dopo km
         for km in range(0, km_totali, max(1, km_totali // 15)):
             current_seg_type = segmenti[km]["type"]
             current_soc_sim = storia_soc[km]
             current_fuel_sim = storia_fuel[km]
             current_suggested = modalita_suggerita[km]
             
-            # Controllo e trigger della sintesi vocale ad ogni transizione di modalità di guida
             if current_suggested != last_announced_mode:
                 if current_suggested == "EV":
                     msg = "Elettricità pura consigliata. Passa a modalità E V."
@@ -369,16 +376,13 @@ with col_main:
                     trigger_speech_html(msg)
                 last_announced_mode = current_suggested
             
-            # Rendering grafico dell'HUD della vettura
             with hud_placeholder.container():
                 st.markdown(f"#### 🛣️ Tratta corrente: **{current_seg_type}**")
-                
                 col_hud1, col_hud2, col_hud3 = st.columns(3)
                 col_hud1.metric("Km Rimanenti", f"{km_totali - km} km")
                 col_hud2.metric("SOC Corrente", f"{current_soc_sim:.1f}%")
                 col_hud3.metric("Carburante Residuo", f"{current_fuel_sim:.1f} L")
                 
-                # Visualizzazione della modalità di guida consigliata a tutto schermo
                 st.markdown(
                     f"""
                     <div style="background-color:#1e293b; border-radius:15px; padding:20px; text-align:center; border: 2px solid #00f2fe;">
@@ -388,14 +392,11 @@ with col_main:
                     """, 
                     unsafe_allow_html=True
                 )
-                
                 st.progress(min(km / km_totali, 1.0))
-            
-            # Pausa temporale per rallentare l'avanzamento visivo della simulazione
             time.sleep(1.2)
             
         st.balloons()
-        st.success("🏆 Sei arrivato a destinazione con la massima efficienza! Compila la calibrazione se necessario.")
+        st.success("🏆 Sei arrivato a destinazione con la massima efficienza!")
 
     # --- SCHEDA 4: GRAFICI DINAMICI DEL CONSUMO ---
     st.markdown("---")
@@ -407,8 +408,6 @@ with col_main:
             "SOC Batteria (%)": storia_soc,
             "Benzina nel Serbatoio (Litri)": storia_fuel
         }).set_index("Chilometri Percorsi")
-        
-        # Genera due grafici allineati per tracciare lo scarico di batteria e serbatoio
         st.line_chart(df_chart)
     else:
-        st.info("Imposta i chilometri delle tratte per visualizzare la curva predittiva del consumo dinamico.")
+        st.info("Imposta i chilometri delle tratte per visualizzare la curva predittiva.")
