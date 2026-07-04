@@ -126,22 +126,19 @@ def geocode_city(city_name, api_key):
     return None
 
 def calculate_route_breakdown(coord_start, coord_end, api_key):
-    """Invia richiesta di routing ed estrae le distanze stradali geometriche reali via POST."""
+    """Invia richiesta di routing ed estrae le distanze stradali reali tramite una richiesta GET standard e sicura."""
     hosts = ["https://api.heigit.org", "https://api.openrouteservice.org"]
     
     for host in hosts:
-        url = f"{host}/v2/directions/driving-car/geojson"
-        headers = {
-            "Authorization": api_key,
-            "Content-Type": "application/json"
-        }
-        # Payload standard per richiedere la scomposizione geometrica delle strade (waytypes)
-        body = {
-            "coordinates": [coord_start, coord_end],
-            "extra_info": ["waytypes"]
+        url = f"{host}/v2/directions/driving-car"
+        params = {
+            "api_key": api_key,
+            "start": f"{coord_start[0]},{coord_start[1]}", # lon, lat
+            "end": f"{coord_end[0]},{coord_end[1]}",     # lon, lat
+            "extra_info": "waytypes"
         }
         try:
-            res = requests.post(url, json=body, headers=headers, timeout=15)
+            res = requests.get(url, params=params, timeout=15)
             if res.status_code == 200:
                 data = res.json()
                 if "features" in data and len(data["features"]) > 0:
