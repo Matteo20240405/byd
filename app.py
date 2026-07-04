@@ -2,6 +2,8 @@
 import pandas as pd
 import time
 import base64
+import requests
+import math
 
 # Configurazione della pagina Streamlit per desktop e dispositivi mobili
 st.set_page_config(
@@ -28,6 +30,14 @@ if "coeff_ev_highway" not in st.session_state:
 if "coeff_hev_fuel" not in st.session_state:
     st.session_state.coeff_hev_fuel = 0.049  # 4.9 L/100km (Consumo termico standard)
 
+# --- INIZIALIZZAZIONE STATO TRATTE ---
+if "km_u" not in st.session_state:
+    st.session_state.km_u = 15.0
+if "km_e" not in st.session_state:
+    st.session_state.km_e = 25.0
+if "km_h" not in st.session_state:
+    st.session_state.km_h = 40.0
+
 # --- STRUMENTO AUDIO DI SINTESI VOCALE (TTS) ---
 def trigger_speech_html(text):
     """Genera ed esegue un comando SpeechSynthesis nativo HTML5 nel browser del telefono/PC."""
@@ -44,6 +54,82 @@ def trigger_speech_html(text):
     </script>
     """
     st.components.v1.html(js_code, height=0, width=0)
+
+# --- CALCOLO GEOMETRICO DISTANZE (Haversine) ---
+def haversine(lon1, lat1, lon2, lat2):
+    """Calcola la distanza tra due coordinate geografiche in km."""
+    lon1, lat1, lon2, lat2 = map(math.radians, [lon1, lat1, lon2, lat2])
+    dlon = lon2 - lon1 
+    dlat = lat2 - lat1 
+    a = math.sin(dlat/2)**2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon/2)**2
+    c = 2 * math.asin(math.sqrt(a)) 
+    r = 6371.0 # Raggio terrestre medio in chilometri
+    return c * r
+
+# --- FUNZIONI DI INTEGRAZIONE CON API HEIGIT ---
+def geocode_city(city_name, api_key):
+    """Converte il nome di una città in coordinate [lon, lat]."""
+    url = "https://api.heigit.org/geocode/search"
+    headers = {"Authorization": api_key}
+    params = {"text": city_name, "size": 1}
+    try:
+        res = requests.get(url, headers=headers, params=params, timeout=10)
+        if res.status_code == 200:
+            data = res.json()
+            if "features" in data and len(data["features"]) > 0:
+                return data["features"][0]["geometry"]["coordinates"] # [lon, lat]
+    except Exception as e:
+        st.error(f"Errore geocodifica: {e}")
+    return None
+
+def calculate_route_breakdown(coord_start, coord_end, api_key):
+    """Invia richiesta di routing a HeiGIT e scompone i chilometri stradali."""
+    url = "https://api.heigit.org/v2/directions/driving-car"
+    headers = {
+        "Authorization": api_key,
+        "Content-Type": "application/json"
+    }
+    params = {
+        "start": f"{coord_start[0]},{coord_start[1]}",
+        "end": f"{coord_end[0]},{coord_end[1]}",
+        "extra_info": "waytypes"
+    }
+    try:
+        res = requests.get(url, headers=headers, params=params, timeout=15)
+        if res.status_code == 200:
+            data = res.json()
+            if "features" in data and len(data["features"]) > 0:
+                route = data["features"][0]
+                coords = route["geometry"]["coordinates"]
+                waytypes = route.get("properties", {}).get("extras", {}).get("waytypes", {})
+                values = waytypes.get("values", [])
+                
+                # Calcola le distanze intermedie tra tutti i punti GPS
+                step_distances = []
+                for i in range(len(coords) - 1):
+                    step_distances.append(haversine(coords[i][0], coords[i][1], coords[i+1][0], coords[i+1][1]))
+                
+                km_u, km_e, km_h = 0.0, 0.0, 0.0
+                
+                for val in values:
+                    start_idx, end_idx, w_type = val
+                    # Somma le distanze geometriche reali del segmento corrente
+                    segment_distance = sum(step_distances[start_idx:end_idx])
+                    
+                    if w_type == 1:
+                        # Autostrada (Motorway)
+                        km_h += segment_distance
+                    elif w_type in [2, 3, 4]:
+                        # Extraurbano (Junction, State Road, Provincial)
+                        km_e += segment_distance
+                    else:
+                        # Urbano (Local streets, residential)
+                        km_u += segment_distance
+                
+                return km_u, km_e, km_h
+    except Exception as e:
+        st.error(f"Errore chiamata Routing: {e}")
+    return None
 
 # --- LOGICA DELL'ALGORITMO PREDITTIVO BOOST ---
 def calcola_strategia_viaggio(starting_soc, starting_fuel, d_urban, d_extra, d_highway, is_round_trip, charge_at_dest):
@@ -176,16 +262,47 @@ with col_sidebar:
             st.warning("Inserisci i chilometri reali per effettuare la calibrazione.")
 
 with col_main:
+    # --- NUOVO PANNELLO: CALCOLO AUTOMATICO CON API ---
+    st.header("🌐 Calcolo Automatico Tratta (API)")
+    col_api1, col_api2 = st.columns(2)
+    with col_api1:
+        citta_partenza = st.text_input("Partenza", value="Savona")
+    with col_api2:
+        citta_arrivo = st.text_input("Arrivo", value="Torino")
+        
+    if st.button("Ottieni Tratta Automaticamente", type="primary", use_container_width=True):
+        with st.spinner("Geolocalizzazione e calcolo geometrico del tragitto in corso..."):
+            coord_start = geocode_city(citta_partenza, API_KEY)
+            coord_end = geocode_city(citta_arrivo, API_KEY)
+            
+            if coord_start and coord_end:
+                breakdown = calculate_route_breakdown(coord_start, coord_end, API_KEY)
+                if breakdown:
+                    km_u_calcolati, km_e_calcolati, km_h_calcolati = breakdown
+                    
+                    # Salva nello stato della sessione per aggiornare l'interfaccia utente
+                    st.session_state.km_u = float(round(km_u_calcolati, 1))
+                    st.session_state.km_e = float(round(km_e_calcolati, 1))
+                    st.session_state.km_h = float(round(km_h_calcolati, 1))
+                    
+                    st.success(f"Tratta trovata con successo! Rilevati: {st.session_state.km_u} km urbani, {st.session_state.km_e} km extraurbani e {st.session_state.km_h} km autostradali.")
+                    st.rerun()
+                else:
+                    st.error("Impossibile analizzare i segmenti stradali per questa tratta.")
+            else:
+                st.error("Errore nella ricerca geografica di partenza o destinazione. Controlla l'ortografia.")
+
     # --- SCHEDA 1: PIANIFICAZIONE ---
-    st.header("🗺️ Pianificatore Avanzato Tragitto")
+    st.markdown("---")
+    st.header("🗺️ Dettaglio Chilometri e Strategia")
     
     col_p1, col_p2, col_p3 = st.columns(3)
     with col_p1:
-        km_u = st.number_input("Distanza Urbana (<50 km/h) [km]", min_value=0.0, value=15.0, step=1.0)
+        km_u = st.number_input("Distanza Urbana (<50 km/h) [km]", min_value=0.0, key="km_u", step=1.0)
     with col_p2:
-        km_e = st.number_input("Distanza Extraurbana (50-90 km/h) [km]", min_value=0.0, value=25.0, step=1.0)
+        km_e = st.number_input("Distanza Extraurbana (50-90 km/h) [km]", min_value=0.0, key="km_e", step=1.0)
     with col_p3:
-        km_h = st.number_input("Distanza Autostradale (>90 km/h) [km]", min_value=0.0, value=40.0, step=1.0)
+        km_h = st.number_input("Distanza Autostradale (>90 km/h) [km]", min_value=0.0, key="km_h", step=1.0)
         
     col_opts1, col_opts2 = st.columns(2)
     with col_opts1:
