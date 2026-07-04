@@ -78,23 +78,7 @@ def haversine(lon1, lat1, lon2, lat2):
 
 def geocode_city(city_name, api_key):
     """Converte il nome di una città in coordinate [lon, lat] con strategie di fallback avanzate."""
-    # Strategia 1: OpenRouteService con autenticazione via parametro query
-    url_ors = "https://api.openrouteservice.org/geocode/search"
-    params_ors = {
-        "text": city_name,
-        "size": 1,
-        "api_key": api_key
-    }
-    try:
-        res = requests.get(url_ors, params=params_ors, timeout=8)
-        if res.status_code == 200:
-            data = res.json()
-            if "features" in data and len(data["features"]) > 0:
-                return data["features"][0]["geometry"]["coordinates"] # [lon, lat]
-    except Exception:
-        pass
-
-    # Strategia 2: Fallback d'emergenza gratuito con Nominatim (OSM)
+    # Strategia 1: Proviamo prima Nominatim (OpenStreetMap), completamente gratuito e senza chiavi API
     url_osm = "https://nominatim.openstreetmap.org/search"
     params_osm = {
         "q": city_name,
@@ -114,11 +98,71 @@ def geocode_city(city_name, api_key):
                 return [lon, lat]
     except Exception:
         pass
+
+    # Strategia 2: OpenRouteService con autenticazione via parametro query
+    url_ors = "https://api.openrouteservice.org/geocode/search"
+    params_ors = {
+        "text": city_name,
+        "size": 1,
+        "api_key": api_key
+    }
+    try:
+        res = requests.get(url_ors, params=params_ors, timeout=8)
+        if res.status_code == 200:
+            data = res.json()
+            if "features" in data and len(data["features"]) > 0:
+                return data["features"][0]["geometry"]["coordinates"] # [lon, lat]
+    except Exception:
+        pass
         
     return None
 
 def calculate_route_breakdown(coord_start, coord_end, api_key):
     """Invia richiesta di routing ed estrae le distanze stradali reali e la traccia geometrica."""
+    # Motore di routing primario: OSRM (Gratuito, senza chiavi, estremamente preciso e veloce)
+    url_osrm = f"https://router.project-osrm.org/route/v1/driving/{coord_start[0]},{coord_start[1]};{coord_end[0]},{coord_end[1]}?overview=full&geometries=geojson&steps=true"
+    try:
+        res = requests.get(url_osrm, timeout=8)
+        if res.status_code == 200:
+            data = res.json()
+            if "routes" in data and len(data["routes"]) > 0:
+                route = data["routes"][0]
+                coords = route["geometry"]["coordinates"]
+                
+                # Salva le coordinate per la mappa (invertendo l'ordine lon/lat in lat/lon per Folium)
+                st.session_state.route_coords = [[pt[1], pt[0]] for pt in coords]
+                
+                # Scomposizione chilometrica basata sulle velocità stimate di ciascun segmento
+                km_u, km_e, km_h = 0.0, 0.0, 0.0
+                legs = route.get("legs", [])
+                for leg in legs:
+                    steps = leg.get("steps", [])
+                    for step in steps:
+                        dist_m = step.get("distance", 0.0)
+                        dur_s = step.get("duration", 1.0)
+                        dist_km = dist_m / 1000.0
+                        
+                        # Calcolo velocità del segmento per classificare la strada
+                        speed_kmh = (dist_km / (dur_s / 3600.0)) if dur_s > 0 else 0.0
+                        
+                        if speed_kmh >= 85.0:
+                            km_h += dist_km
+                        elif speed_kmh >= 45.0:
+                            km_e += dist_km
+                        else:
+                            km_u += dist_km
+                            
+                total_km = route.get("distance", 0.0) / 1000.0
+                if (km_u + km_e + km_h) < 0.1 and total_km > 0:
+                    km_u = total_km * 0.15
+                    km_e = total_km * 0.25
+                    km_h = total_km * 0.60
+                    
+                return km_u, km_e, km_h
+    except Exception:
+        pass
+
+    # Motore di routing secondario: OpenRouteService (Fallback)
     endpoints = [
         {"url": "https://api.heigit.org/ors/v2/directions/driving-car", "auth_mode": "header"},
         {"url": "https://api.openrouteservice.org/v2/directions/driving-car", "auth_mode": "param"}
@@ -149,10 +193,8 @@ def calculate_route_breakdown(coord_start, coord_end, api_key):
                     route = data["features"][0]
                     coords = route["geometry"]["coordinates"]
                     
-                    # Salva le coordinate per la mappa (invertendo l'ordine lon/lat in lat/lon per Folium)
                     st.session_state.route_coords = [[pt[1], pt[0]] for pt in coords]
                     
-                    # Calcola le distanze intermedie tra tutti i punti GPS
                     step_distances = []
                     for i in range(len(coords) - 1):
                         step_distances.append(haversine(coords[i][0], coords[i][1], coords[i+1][0], coords[i+1][1]))
@@ -183,7 +225,7 @@ def calculate_route_breakdown(coord_start, coord_end, api_key):
         except Exception:
             pass
             
-    # Strategia di backup se le API falliscono
+    # Strategia di backup se tutte le API falliscono
     dist_lineare = haversine(coord_start[0], coord_start[1], coord_end[0], coord_end[1])
     dist_stradale_stimata = dist_lineare * 1.20
     st.session_state.route_coords = [
@@ -351,8 +393,9 @@ with col_main:
     folium.Marker(st.session_state.start_coords, popup="Partenza", icon=folium.Icon(color="green", icon="play")).add_to(m)
     folium.Marker(st.session_state.end_coords, popup="Arrivo", icon=folium.Icon(color="red", icon="stop")).add_to(m)
     
-    # Renderizza la mappa nello schermo
-    st_folium(m, width="100%", height=350, key="byd_copilot_map")
+    # Forza la ricreazione del componente mappa inserendo coordinate e lunghezza percorso nella chiave
+    map_key = f"byd_copilot_map_{len(st.session_state.route_coords)}_{st.session_state.start_coords[0]}_{st.session_state.end_coords[0]}"
+    st_folium(m, width="100%", height=350, key=map_key)
 
     st.markdown("---")
     st.header("🧭 Copilota Attivo in Guida")
