@@ -66,32 +66,63 @@ def haversine(lon1, lat1, lon2, lat2):
     r = 6371.0 # Raggio terrestre medio in chilometri
     return c * r
 
-# --- FUNZIONI DI INTEGRAZIONE CON API HEIGIT (Multi-host ultra-resiliente) ---
+# --- FUNZIONI DI INTEGRAZIONE CON API (Multi-host + Fallback Nominatim) ---
 def geocode_city(city_name, api_key):
-    """Converte il nome di una città in coordinate [lon, lat] provando più endpoint."""
-    hosts = ["https://api.heigit.org", "https://api.openrouteservice.org"]
-    
-    for host in hosts:
-        url = f"{host}/geocode/search"
-        # Trasmettiamo la chiave sia nei parametri che nell'header per aggirare blocchi di sicurezza
-        params = {
-            "text": city_name,
-            "size": 1,
-            "api_key": api_key
-        }
-        headers = {
-            "Authorization": api_key
-        }
-        try:
-            res = requests.get(url, params=params, headers=headers, timeout=10)
-            if res.status_code == 200:
-                data = res.json()
-                if "features" in data and len(data["features"]) > 0:
-                    return data["features"][0]["geometry"]["coordinates"] # Ritorna [lon, lat]
-            else:
-                st.warning(f"Diagnostica di Ricerca ({host}): Errore {res.status_code} - {res.text[:100]}")
-        except Exception as e:
-            st.warning(f"Disconnessione temporanea ({host}): {e}")
+    """Converte il nome di una città in coordinate [lon, lat] con strategie di fallback avanzate."""
+    # Strategia 1: OpenRouteService con autenticazione pulita via parametro (Senza header per evitare 403)
+    url_ors = "https://api.openrouteservice.org/geocode/search"
+    params_ors = {
+        "text": city_name,
+        "size": 1,
+        "api_key": api_key
+    }
+    try:
+        res = requests.get(url_ors, params=params_ors, timeout=8)
+        if res.status_code == 200:
+            data = res.json()
+            if "features" in data and len(data["features"]) > 0:
+                return data["features"][0]["geometry"]["coordinates"] # [lon, lat]
+    except Exception:
+        pass
+
+    # Strategia 2: OpenRouteService con autenticazione pulita via Header (Senza parametro query)
+    params_header = {
+        "text": city_name,
+        "size": 1
+    }
+    headers_ors = {
+        "Authorization": api_key
+    }
+    try:
+        res = requests.get(url_ors, params=params_header, headers=headers_ors, timeout=8)
+        if res.status_code == 200:
+            data = res.json()
+            if "features" in data and len(data["features"]) > 0:
+                return data["features"][0]["geometry"]["coordinates"] # [lon, lat]
+    except Exception:
+        pass
+
+    # Strategia 3: BULLETPROOF FALLBACK - Nominatim OpenStreetMap (Gratuito, senza chiavi e stabilissimo)
+    url_osm = "https://nominatim.openstreetmap.org/search"
+    params_osm = {
+        "q": city_name,
+        "format": "json",
+        "limit": 1
+    }
+    headers_osm = {
+        "User-Agent": "dmi-copilot-byd-application"
+    }
+    try:
+        res = requests.get(url_osm, params=params_osm, headers=headers_osm, timeout=8)
+        if res.status_code == 200:
+            data = res.json()
+            if len(data) > 0:
+                lon = float(data[0]["lon"])
+                lat = float(data[0]["lat"])
+                return [lon, lat]
+    except Exception:
+        pass
+        
     return None
 
 def calculate_route_breakdown(coord_start, coord_end, api_key):
