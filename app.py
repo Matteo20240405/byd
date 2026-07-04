@@ -6,16 +6,12 @@ from streamlit_folium import folium_static
 
 st.set_page_config(page_title="DMi Copilot - BYD Atto 2", layout="wide")
 
-# Inizializzazione variabili di stato
 if 'trip_data' not in st.session_state:
     st.session_state.trip_data = None
-if 'sim_km' not in st.session_state:
-    st.session_state.sim_km = 0
 
 st.title("🔋 DMi Copilot - BYD Atto 2 Boost")
 
 def get_route(start, end):
-    # Utilizzo OSRM pubblico (nessuna API key richiesta)
     url = f"http://router.project-osrm.org/route/v1/driving/{start[1]},{start[0]};{end[1]},{end[0]}?overview=full&geometries=geojson"
     response = requests.get(url)
     if response.status_code == 200:
@@ -23,7 +19,6 @@ def get_route(start, end):
     return None
 
 def geocode(location_name):
-    # Nominatim per convertire nomi in coordinate
     url = f"https://nominatim.openstreetmap.org/search?q={location_name}&format=json&limit=1"
     response = requests.get(url, headers={'User-Agent': 'DMiCopilotApp'})
     if response.status_code == 200:
@@ -33,6 +28,9 @@ def geocode(location_name):
     return None
 
 def calculate_strategy(dist_urban, dist_extra, dist_highway, initial_soc):
+    # Consumi stimati (riferimenti per BYD DM-i)
+    # EV: ca 14-16 kWh/100km | HEV: ca 4.5-5.5 L/100km
+    
     segments = []
     if dist_urban > 0: segments.append({"type": "Urbano", "dist": dist_urban, "env": "urban"})
     if dist_extra > 0: segments.append({"type": "Extraurbano", "dist": dist_extra, "env": "extra"})
@@ -44,25 +42,30 @@ def calculate_strategy(dist_urban, dist_extra, dist_highway, initial_soc):
     for seg in segments:
         mode = "EV MODE"
         target_save = None
+        stima_consumo_energia = 0
+        stima_consumo_benzina = 0
         
         if seg['env'] == "highway":
-            # LOGICA SAVE: Imposta il target al valore di SOC attuale
-            target_save = int(current_soc)
+            # LOGICA SAVE: Limite massimo 75% come da specifiche BYD
+            target_save = min(int(current_soc), 75)
             mode = f"HEV SAVE (Target: {target_save}%)"
-            # Consumo simulato leggero
-            current_soc -= (seg['dist'] * 0.05)
+            stima_consumo_benzina = seg['dist'] * 0.055 # 5.5L/100km in autostrada
+            current_soc -= (seg['dist'] * 0.01) # Lieve erosione batteria in HEV
         elif seg['env'] == "urban":
             mode = "EV MODE"
+            stima_consumo_energia = seg['dist'] * 0.14 # 14kWh/100km
             current_soc -= (seg['dist'] * 0.02)
         else:
             mode = "HEV ECO"
-            current_soc -= (seg['dist'] * 0.03)
+            stima_consumo_benzina = seg['dist'] * 0.045 # 4.5L/100km in extraurbano
+            current_soc -= (seg['dist'] * 0.01)
             
         strategy.append({
             "segmento": seg['type'],
             "distanza": seg['dist'],
             "modalita": mode,
-            "target_save": target_save
+            "target_save": target_save,
+            "consumo_benzina": round(stima_consumo_benzina, 2)
         })
         
     return strategy
@@ -96,14 +99,13 @@ if st.session_state.trip_data:
     with col1:
         st.subheader("🗺️ Mappa Percorso")
         m = folium.Map(location=data['coords_p'], zoom_start=9)
-        # Inverti coordinate per folium (lon, lat)
         path = [(c[1], c[0]) for c in data['coords']]
         folium.PolyLine(path, color="blue", weight=5, opacity=0.8).add_to(m)
         folium_static(m)
         
     with col2:
         st.subheader("📋 Strategia Boost")
-        # Semplificazione: dividiamo la distanza in 3 tratte proporzionali
+        # Suddivisione proporzionale per la simulazione
         strat = calculate_strategy(data['dist']*0.2, data['dist']*0.3, data['dist']*0.5, initial_soc)
         
         for step in strat:
@@ -112,6 +114,8 @@ if st.session_state.trip_data:
                 st.info(f"Modalità Consigliata: **{step['modalita']}**")
                 if step['target_save']:
                     st.warning(f"⚠️ **IMPOSTA SAVE AL {step['target_save']}%** sul display BYD!")
+                if step['consumo_benzina'] > 0:
+                    st.write(f"⛽ Consumo benzina stimato: ~{step['consumo_benzina']} L")
 
 st.divider()
 st.subheader("🏁 Modalità Guida Reale")
