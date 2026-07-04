@@ -78,6 +78,10 @@ def haversine(lon1, lat1, lon2, lat2):
 
 def geocode_city(city_name, api_key):
     """Converte il nome di una città in coordinate [lon, lat] con strategie di fallback avanzate."""
+    # Correzione automatica della chiave se inizia con la maiuscola
+    if api_key.startswith("EyJ"):
+        api_key = "e" + api_key[1:]
+
     # Strategia 1: Proviamo prima Nominatim (OpenStreetMap), completamente gratuito e senza chiavi API
     url_osm = "https://nominatim.openstreetmap.org/search"
     params_osm = {
@@ -86,7 +90,7 @@ def geocode_city(city_name, api_key):
         "limit": 1
     }
     headers_osm = {
-        "User-Agent": "dmi-copilot-byd-application"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
     try:
         res = requests.get(url_osm, params=params_osm, headers=headers_osm, timeout=8)
@@ -119,10 +123,16 @@ def geocode_city(city_name, api_key):
 
 def calculate_route_breakdown(coord_start, coord_end, api_key):
     """Invia richiesta di routing ed estrae le distanze stradali reali e la traccia geometrica."""
+    if api_key.startswith("EyJ"):
+        api_key = "e" + api_key[1:]
+
     # Motore di routing primario: OSRM (Gratuito, senza chiavi, estremamente preciso e veloce)
     url_osrm = f"https://router.project-osrm.org/route/v1/driving/{coord_start[0]},{coord_start[1]};{coord_end[0]},{coord_end[1]}?overview=full&geometries=geojson&steps=true"
+    headers_osrm = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
     try:
-        res = requests.get(url_osrm, timeout=8)
+        res = requests.get(url_osrm, headers=headers_osrm, timeout=8)
         if res.status_code == 200:
             data = res.json()
             if "routes" in data and len(data["routes"]) > 0:
@@ -525,3 +535,4 @@ with col_main:
                             trigger_speech_html("Viaggio concluso con successo.")
                             st.balloons()
                             st.rerun()
+                         
