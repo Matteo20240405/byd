@@ -30,6 +30,12 @@ if "coeff_ev_highway" not in st.session_state:
 if "coeff_hev_fuel" not in st.session_state:
     st.session_state.coeff_hev_fuel = 0.049  # 4.9 L/100km (Consumo termico standard)
 
+# --- STATO DEL VIAGGIO REALE ---
+if "current_step" not in st.session_state:
+    st.session_state.current_step = 0
+if "trip_active" not in st.session_state:
+    st.session_state.trip_active = False
+
 # --- INIZIALIZZAZIONE STATO TRATTE ---
 if "km_u" not in st.session_state:
     st.session_state.km_u = 15.0
@@ -69,7 +75,7 @@ def haversine(lon1, lat1, lon2, lat2):
 # --- FUNZIONI DI INTEGRAZIONE CON API (Multi-host + Fallback Nominatim) ---
 def geocode_city(city_name, api_key):
     """Converte il nome di una città in coordinate [lon, lat] con strategie di fallback avanzate."""
-    # Strategia 1: OpenRouteService con autenticazione pulita via parametro (Senza header per evitare 403)
+    # Strategia 1: OpenRouteService con autenticazione via parametro query
     url_ors = "https://api.openrouteservice.org/geocode/search"
     params_ors = {
         "text": city_name,
@@ -103,7 +109,7 @@ def geocode_city(city_name, api_key):
     except Exception:
         pass
 
-    # Strategia 3: BULLETPROOF FALLBACK - Nominatim OpenStreetMap (Gratuito, senza chiavi e stabilissimo)
+    # Strategia 3: Fallback d'emergenza gratuito con Nominatim (OSM)
     url_osm = "https://nominatim.openstreetmap.org/search"
     params_osm = {
         "q": city_name,
@@ -127,14 +133,11 @@ def geocode_city(city_name, api_key):
     return None
 
 def calculate_route_breakdown(coord_start, coord_end, api_key):
-    """Invia richiesta di routing ed estrae le distanze stradali reali tramite una richiesta GET standard e sicura."""
+    """Invia richiesta di routing ed estrae le distanze stradali reali tramite GET standard."""
     endpoints = [
-        # 1. Nuovo Endpoint ufficiale HeiGIT con sottocartella /ors/
         {"url": "https://api.heigit.org/ors/v2/directions/driving-car", "auth_mode": "header"},
         {"url": "https://api.heigit.org/ors/directions/driving-car", "auth_mode": "header"},
-        # 2. Endpoint generico
         {"url": "https://api.heigit.org/v2/directions/driving-car", "auth_mode": "header"},
-        # 3. Vecchio host di OpenRouteService
         {"url": "https://api.openrouteservice.org/v2/directions/driving-car", "auth_mode": "param"}
     ]
     
@@ -179,13 +182,10 @@ def calculate_route_breakdown(coord_start, coord_end, api_key):
                         segment_distance = sum(step_distances[start_idx:end_idx])
                         
                         if w_type == 1:
-                            # Autostrada (Motorway)
                             km_h += segment_distance
                         elif w_type in [2, 3, 4]:
-                            # Extraurbano (State Road / Junction)
                             km_e += segment_distance
                         else:
-                            # Urbano (Residenziale, vie cittadine)
                             km_u += segment_distance
                             
                     # Fallback di sicurezza in caso di strade corte prive di classificazione waytypes
@@ -199,18 +199,14 @@ def calculate_route_breakdown(coord_start, coord_end, api_key):
         except Exception:
             pass
             
-    # --- STRATEGIA DI BACKUP ESTREMA (Se tutti i server di routing falliscono) ---
-    st.warning("⚠️ Impossibile analizzare i segmenti dettagliati tramite le API. L'applicazione ha attivato il calcolo geometrico d'emergenza.")
-    
-    # Calcola la distanza diretta lineare (Haversine)
+    # --- STRATEGIA DI BACKUP ESTREMA ---
+    st.warning("⚠️ Impossibile analizzare i segmenti dettagliati tramite le API. Attivato calcolo geometrico d'emergenza.")
     dist_lineare = haversine(coord_start[0], coord_start[1], coord_end[0], coord_end[1])
-    # Aggiunge un fattore di deviazione stradale medio del +20% rispetto alla linea d'aria
     dist_stradale_stimata = dist_lineare * 1.20
     
-    # Scompone la tratta secondo uno schema stradale standard
-    km_u = dist_stradale_stimata * 0.15 # 15% Urbano
-    km_e = dist_stradale_stimata * 0.25 # 25% Extraurbano
-    km_h = dist_stradale_stimata * 0.60 # 60% Autostradale
+    km_u = dist_stradale_stimata * 0.15 
+    km_e = dist_stradale_stimata * 0.25 
+    km_h = dist_stradale_stimata * 0.60 
     
     return km_u, km_e, km_h
 
@@ -402,59 +398,172 @@ with col_main:
     # --- SCHEDA 3: COPILOTA VOCALE ATTIVO ED EMULATORE HUD ---
     st.markdown("---")
     st.header("🧭 Copilota Attivo in Guida")
-    st.write("Avvia la simulazione del viaggio in tempo reale. Il sistema emetterà notifiche vocali intelligenti prima di ogni cambio di modalità stradale.")
+    st.write("Scegli se avviare una simulazione rapida per testare l'app a casa, o attivare la modalità di viaggio manuale da usare sul supporto del telefono mentre guidi la tua BYD.")
     
-    start_sim = st.button("🚀 AVVIA SIMULAZIONE GUIDA REALE")
+    opzione_guida = st.radio("Seleziona modalità copilota:", ["Simulazione di prova (Test a casa)", "Viaggio Reale (Usa mentre guidi)"], horizontal=True)
     
-    if start_sim and km_totali > 0:
-        hud_placeholder = st.empty()
-        audio_placeholder = st.empty()
+    if opzione_guida == "Simulazione di prova (Test a casa)":
+        start_sim = st.button("🚀 AVVIA SIMULAZIONE VELOCE")
         
-        last_announced_mode = ""
-        
-        for km in range(0, km_totali, max(1, km_totali // 15)):
-            current_seg_type = segmenti[km]["type"]
-            current_soc_sim = storia_soc[km]
-            current_fuel_sim = storia_fuel[km]
-            current_suggested = modalita_suggerita[km]
+        if start_sim and km_totali > 0:
+            hud_placeholder = st.empty()
+            audio_placeholder = st.empty()
+            last_announced_mode = ""
             
-            if current_suggested != last_announced_mode:
-                if current_suggested == "EV":
-                    msg = "Elettricità pura consigliata. Passa a modalità E V."
-                elif current_suggested == "HEV SAVE":
-                    msg = f"Tratto veloce rilevato. Imposta la modalità Save sul display e blocca lo stato di carica al {current_soc_sim:.0f} percento."
-                elif current_suggested == "HEV POWER":
-                    msg = "Richiesta massima potenza. Passa a modalità H E V Power."
-                elif current_suggested == "CHARGE":
-                    msg = "Raggiunta destinazione intermedia. Collega il veicolo alla colonnina di ricarica."
+            for km in range(0, km_totali, max(1, km_totali // 15)):
+                current_seg_type = segmenti[km]["type"]
+                current_soc_sim = storia_soc[km]
+                current_fuel_sim = storia_fuel[km]
+                current_suggested = modalita_suggerita[km]
+                
+                if current_suggested != last_announced_mode:
+                    if current_suggested == "EV":
+                        msg = "Elettricità pura consigliata. Passa a modalità E V."
+                    elif current_suggested == "HEV SAVE":
+                        msg = f"Tratto veloce rilevato. Imposta la modalità Save sul display e blocca lo stato di carica al {current_soc_sim:.0f} percento."
+                    elif current_suggested == "HEV POWER":
+                        msg = "Richiesta massima potenza. Passa a modalità H E V Power."
+                    elif current_suggested == "CHARGE":
+                        msg = "Raggiunta destinazione intermedia. Collega il veicolo alla colonnina di ricarica."
+                    else:
+                        msg = f"Cambio modalità stradale. Imposta modalità {current_suggested}."
+                    
+                    with audio_placeholder:
+                        trigger_speech_html(msg)
+                    last_announced_mode = current_suggested
+                
+                with hud_placeholder.container():
+                    st.markdown(f"#### 🛣️ Tratta corrente: **{current_seg_type}**")
+                    col_hud1, col_hud2, col_hud3 = st.columns(3)
+                    col_hud1.metric("Km Rimanenti", f"{km_totali - km} km")
+                    col_hud2.metric("SOC Corrente", f"{current_soc_sim:.1f}%")
+                    col_hud3.metric("Carburante Residuo", f"{current_fuel_sim:.1f} L")
+                    
+                    st.markdown(
+                        f"""
+                        <div style="background-color:#1e293b; border-radius:15px; padding:20px; text-align:center; border: 2px solid #00f2fe;">
+                            <span style="color:#94a3b8; font-size:12px; font-weight:bold; text-transform:uppercase; letter-spacing:1px;">Impostazione Consigliata sul Display BYD</span>
+                            <h2 style="color:#00f2fe; margin-top:5px; font-weight:800; font-size:32px; letter-spacing:2px;">{current_suggested}</h2>
+                        </div>
+                        """, 
+                        unsafe_allow_html=True
+                    )
+                    st.progress(min(km / km_totali, 1.0))
+                time.sleep(1.2)
+                
+            st.balloons()
+            st.success("🏆 Sei arrivato a destinazione con la massima efficienza!")
+
+    else:
+        # --- MODALITÀ VIAGGIO REALE (INTERFACCIA OTTIMIZZATA PER CELLULARE) ---
+        if km_totali == 0:
+            st.info("Imposta prima i chilometri della tratta per attivare il copilota.")
+        else:
+            # Creazione di un elenco di segmenti unici / macro-tappe per rendere l'interazione semplice
+            macro_segmenti = []
+            km_accumulati = 0
+            
+            # Scompone la sequenza km per km in blocchi di tappe logiche
+            attuale_tipo = None
+            for idx, seg in enumerate(segmenti):
+                if seg["type"] != attuale_tipo:
+                    macro_segmenti.append({
+                        "id": len(macro_segmenti),
+                        "type": seg["type"],
+                        "start_km": km_accumulati,
+                        "soc": storia_soc[idx],
+                        "fuel": storia_fuel[idx],
+                        "suggested": modalita_suggerita[idx]
+                    })
+                    attuale_tipo = seg["type"]
+                km_accumulati += 1
+                
+            total_steps = len(macro_segmenti)
+            
+            if not st.session_state.trip_active:
+                if st.button("🏁 INIZIA VIAGGIO REALE A BORDO DELLA BYD", type="primary", use_container_width=True):
+                    st.session_state.trip_active = True
+                    st.session_state.current_step = 0
+                    
+                    # Annuncio iniziale di benvenuto
+                    primo_suggerimento = macro_segmenti[0]["suggested"]
+                    msg_iniziale = f"Pianificazione avviata. Per la prima tratta, imposta la modalità {primo_suggerimento} sul display BYD."
+                    trigger_speech_html(msg_iniziale)
+                    st.rerun()
+            else:
+                current_idx = st.session_state.current_step
+                
+                if current_idx < total_steps:
+                    tappa_corrente = macro_segmenti[current_idx]
+                    
+                    # Layout HUD Mobile
+                    st.markdown(
+                        f"""
+                        <div style="background-color:#0f172a; border-radius:20px; padding:25px; border: 3px solid #10b981; margin-bottom:15px;">
+                            <span style="color:#34d399; font-size:12px; font-weight:800; text-transform:uppercase; letter-spacing:2px; display:block; margin-bottom:5px;">📍 TAPPA ATTUALE ({current_idx + 1} di {total_steps})</span>
+                            <h2 style="color:#ffffff; margin:0; font-size:28px; font-weight:800;">{tappa_corrente['type']}</h2>
+                        </div>
+                        """,
+                        unsafe_allow_html=True
+                    )
+                    
+                    col_hud1, col_hud2, col_hud3 = st.columns(3)
+                    col_hud1.metric("SOC Stimato", f"{tappa_corrente['soc']:.0f}%")
+                    col_hud2.metric("Carburante", f"{tappa_corrente['fuel']:.1f} L")
+                    col_hud3.metric("Km d'inizio", f"{tappa_corrente['start_km']} km")
+                    
+                    # Display delle istruzioni di guida consigliate a caratteri giganti
+                    st.markdown(
+                        f"""
+                        <div style="background-color:#1e293b; border-radius:15px; padding:20px; text-align:center; border: 2px solid #00f2fe; margin-top:15px; margin-bottom:20px;">
+                            <span style="color:#94a3b8; font-size:12px; font-weight:bold; text-transform:uppercase; letter-spacing:1px;">Impostazione Consigliata sul Display BYD</span>
+                            <h1 style="color:#00f2fe; margin-top:5px; margin-bottom:5px; font-weight:900; font-size:42px; letter-spacing:2px;">{tappa_corrente['suggested']}</h1>
+                            <p style="color:#cbd5e1; font-size:13px; margin:0;">Imposta questa modalità sulla console centrale della vettura per preservare l'efficienza.</p>
+                        </div>
+                        """, 
+                        unsafe_allow_html=True
+                    )
+                    
+                    # PULSANTE GIGANTE PER CAMBIARE TRATTA IN SICUREZZA MENTRE SI GUIDA
+                    if current_idx + 1 < total_steps:
+                        prossima_tappa = macro_segmenti[current_idx + 1]
+                        testo_pulsante = f"➡️ SONO ENTRATO NEL TRATTO SUCCESSIVO: {prossima_tappa['type'].upper()}"
+                        
+                        if st.button(testo_pulsante, type="primary", use_container_width=True):
+                            st.session_state.current_step += 1
+                            
+                            # Annuncio Vocale (TTS) per il cambio di modalità di guida della tappa successiva
+                            modo_next = prossima_tappa['suggested']
+                            soc_next = prossima_tappa['soc']
+                            if modo_next == "EV":
+                                msg = "Cambio tratta. Passa a modalità Puramente Elettrica."
+                            elif modo_next == "HEV SAVE":
+                                msg = f"Ingresso in superstrada o autostrada. Imposta la modalità Save e blocca lo stato di carica al {soc_next:.0f} percento."
+                            elif modo_next == "HEV POWER":
+                                msg = "Tratto ad alta intensità. Attiva modalità H E V Power per sfruttare entrambi i motori."
+                            else:
+                                msg = f"Prossima tratta avviata. Seleziona modalità {modo_next} sul display centrale."
+                                
+                            trigger_speech_html(msg)
+                            st.rerun()
+                    else:
+                        if st.button("🏁 CONCLUDI IL VIAGGIO E SALVA I DATI", type="primary", use_container_width=True):
+                            st.session_state.trip_active = False
+                            st.session_state.current_step = 0
+                            trigger_speech_html("Viaggio concluso con successo. Ben arrivato a destinazione.")
+                            st.balloons()
+                            st.rerun()
+                            
+                    if st.button("❌ Termina o Resetta Viaggio", type="secondary"):
+                        st.session_state.trip_active = False
+                        st.session_state.current_step = 0
+                        st.rerun()
                 else:
-                    msg = f"Cambio modalità stradale. Imposta modalità {current_suggested}."
-                
-                with audio_placeholder:
-                    trigger_speech_html(msg)
-                last_announced_mode = current_suggested
-            
-            with hud_placeholder.container():
-                st.markdown(f"#### 🛣️ Tratta corrente: **{current_seg_type}**")
-                col_hud1, col_hud2, col_hud3 = st.columns(3)
-                col_hud1.metric("Km Rimanenti", f"{km_totali - km} km")
-                col_hud2.metric("SOC Corrente", f"{current_soc_sim:.1f}%")
-                col_hud3.metric("Carburante Residuo", f"{current_fuel_sim:.1f} L")
-                
-                st.markdown(
-                    f"""
-                    <div style="background-color:#1e293b; border-radius:15px; padding:20px; text-align:center; border: 2px solid #00f2fe;">
-                        <span style="color:#94a3b8; font-size:12px; font-weight:bold; text-transform:uppercase; letter-spacing:1px;">Impostazione Consigliata sul Display BYD</span>
-                        <h2 style="color:#00f2fe; margin-top:5px; font-weight:800; font-size:32px; letter-spacing:2px;">{current_suggested}</h2>
-                    </div>
-                    """, 
-                    unsafe_allow_html=True
-                )
-                st.progress(min(km / km_totali, 1.0))
-            time.sleep(1.2)
-            
-        st.balloons()
-        st.success("🏆 Sei arrivato a destinazione con la massima efficienza!")
+                    st.success("🏆 Viaggio completato!")
+                    if st.button("Ricomincia", type="primary"):
+                        st.session_state.trip_active = False
+                        st.session_state.current_step = 0
+                        st.rerun()
 
     # --- SCHEDA 4: GRAFICI DINAMICI DEL CONSUMO ---
     st.markdown("---")
@@ -469,3 +578,4 @@ with col_main:
         st.line_chart(df_chart)
     else:
         st.info("Imposta i chilometri delle tratte per visualizzare la curva predittiva.")
+   
