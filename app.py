@@ -85,7 +85,8 @@ def geocode_city(city_name, api_key):
     except Exception:
         pass
 
-    # Strategia 2: OpenRouteService con autenticazione pulita via Header (Senza parametro query)
+    # Strategia 2: HeiGIT ors endpoint con autenticazione Header
+    url_heigit = "https://api.heigit.org/ors/geocode/search"
     params_header = {
         "text": city_name,
         "size": 1
@@ -94,7 +95,7 @@ def geocode_city(city_name, api_key):
         "Authorization": api_key
     }
     try:
-        res = requests.get(url_ors, params=params_header, headers=headers_ors, timeout=8)
+        res = requests.get(url_heigit, params=params_header, headers=headers_ors, timeout=8)
         if res.status_code == 200:
             data = res.json()
             if "features" in data and len(data["features"]) > 0:
@@ -127,18 +128,35 @@ def geocode_city(city_name, api_key):
 
 def calculate_route_breakdown(coord_start, coord_end, api_key):
     """Invia richiesta di routing ed estrae le distanze stradali reali tramite una richiesta GET standard e sicura."""
-    hosts = ["https://api.heigit.org", "https://api.openrouteservice.org"]
+    endpoints = [
+        # 1. Nuovo Endpoint ufficiale HeiGIT con sottocartella /ors/
+        {"url": "https://api.heigit.org/ors/v2/directions/driving-car", "auth_mode": "header"},
+        {"url": "https://api.heigit.org/ors/directions/driving-car", "auth_mode": "header"},
+        # 2. Endpoint generico
+        {"url": "https://api.heigit.org/v2/directions/driving-car", "auth_mode": "header"},
+        # 3. Vecchio host di OpenRouteService
+        {"url": "https://api.openrouteservice.org/v2/directions/driving-car", "auth_mode": "param"}
+    ]
     
-    for host in hosts:
-        url = f"{host}/v2/directions/driving-car"
+    for ep in endpoints:
+        url = ep["url"]
+        auth_mode = ep["auth_mode"]
+        
         params = {
-            "api_key": api_key,
             "start": f"{coord_start[0]},{coord_start[1]}", # lon, lat
             "end": f"{coord_end[0]},{coord_end[1]}",     # lon, lat
             "extra_info": "waytypes"
         }
+        headers = {}
+        
+        if auth_mode == "header":
+            headers["Authorization"] = api_key
+            headers["X-Api-Key"] = api_key
+        else:
+            params["api_key"] = api_key
+            
         try:
-            res = requests.get(url, params=params, timeout=15)
+            res = requests.get(url, params=params, headers=headers, timeout=12)
             if res.status_code == 200:
                 data = res.json()
                 if "features" in data and len(data["features"]) > 0:
@@ -178,11 +196,23 @@ def calculate_route_breakdown(coord_start, coord_end, api_key):
                         km_h = total_dist * 0.60
                         
                     return km_u, km_e, km_h
-            else:
-                st.warning(f"Diagnostica di Routing ({host}): Errore {res.status_code} - {res.text[:100]}")
-        except Exception as e:
-            st.warning(f"Disconnessione temporanea percorso ({host}): {e}")
-    return None
+        except Exception:
+            pass
+            
+    # --- STRATEGIA DI BACKUP ESTREMA (Se tutti i server di routing falliscono) ---
+    st.warning("⚠️ Impossibile analizzare i segmenti dettagliati tramite le API. L'applicazione ha attivato il calcolo geometrico d'emergenza.")
+    
+    # Calcola la distanza diretta lineare (Haversine)
+    dist_lineare = haversine(coord_start[0], coord_start[1], coord_end[0], coord_end[1])
+    # Aggiunge un fattore di deviazione stradale medio del +20% rispetto alla linea d'aria
+    dist_stradale_stimata = dist_lineare * 1.20
+    
+    # Scompone la tratta secondo uno schema stradale standard
+    km_u = dist_stradale_stimata * 0.15 # 15% Urbano
+    km_e = dist_stradale_stimata * 0.25 # 25% Extraurbano
+    km_h = dist_stradale_stimata * 0.60 # 60% Autostradale
+    
+    return km_u, km_e, km_h
 
 # --- LOGICA DELL'ALGORITMO PREDITTIVO BOOST ---
 def calcola_strategia_viaggio(starting_soc, starting_fuel, d_urban, d_extra, d_highway, is_round_trip, charge_at_dest):
