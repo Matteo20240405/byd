@@ -68,12 +68,15 @@ def haversine(lon1, lat1, lon2, lat2):
 
 # --- FUNZIONI DI INTEGRAZIONE CON API HEIGIT ---
 def geocode_city(city_name, api_key):
-    """Converte il nome di una città in coordinate [lon, lat]."""
+    """Converte il nome di una città in coordinate [lon, lat] usando i parametri URL corretti."""
     url = "https://api.heigit.org/geocode/search"
-    headers = {"Authorization": api_key}
-    params = {"text": city_name, "size": 1}
+    params = {
+        "api_key": api_key,
+        "text": city_name,
+        "size": 1
+    }
     try:
-        res = requests.get(url, headers=headers, params=params, timeout=10)
+        res = requests.get(url, params=params, timeout=10)
         if res.status_code == 200:
             data = res.json()
             if "features" in data and len(data["features"]) > 0:
@@ -270,7 +273,7 @@ with col_main:
     with col_api2:
         citta_arrivo = st.text_input("Arrivo", value="Torino")
         
-    if st.button("Ottieni Tratta Automaticamente", type="primary", use_container_width=True):
+    if st.button("Ottieni Tratta Automatically", type="primary", use_container_width=True):
         with st.spinner("Geolocalizzazione e calcolo geometrico del tragitto in corso..."):
             coord_start = geocode_city(citta_partenza, API_KEY)
             coord_end = geocode_city(citta_arrivo, API_KEY)
